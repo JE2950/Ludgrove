@@ -159,6 +159,7 @@ body.touch #hint { display: none; }
   <div class="mapbtns">
     <button class="mc-btn" id="mapWalk">Walk</button>
     <button class="mc-btn" id="mapFly">Fly</button>
+    <button class="mc-btn" id="mapZoom">Whole site</button>
     <button class="mc-btn js-season" id="mapSeason"></button>
     <button class="mc-btn js-sport" id="mapSport"></button>
     <button class="mc-btn" id="mapClose">Close map</button>
@@ -489,20 +490,22 @@ defB(B.RCHAIR, [102, 124, 102], furn); defB(B.KEYS, [82, 128, 82], furn); defB(B
 // ════════════════════════════════════════════════════════════════
 // WORLD  (x runs west → east, z runs north → south, as in the photo)
 // ════════════════════════════════════════════════════════════════
-const W = 176, H = 48, D = 144, ZMIN = -32, DT = D - ZMIN, G = 4, CS = 16;   // z runs from ZMIN (the main pitches, north) to D - 1
+const W = 688, H = 32, D = 640, ZMIN = 0, DT = D - ZMIN, G = 4, CS = 16;   // about one block per metre; north is -z
+let OX = 0, OZ = 0;   // offset applied while a building is moved into place (see at())
 const NCX = W / CS, NCY = H / CS, NCZ = DT / CS;
 const world = new Uint8Array(W * H * DT);
 const reserved = new Uint8Array(W * DT);   // no trees here
 const area = new Uint8Array(W * DT);       // which place each column belongs to
-const ai = (x, z) => (z - ZMIN) * W + x;
-const inWorld = (x, z) => x >= 0 && z >= ZMIN && x < W && z < D;
+const ai = (x, z) => (z + OZ - ZMIN) * W + x + OX;
+const inWorld = (x, z) => x + OX >= 0 && z + OZ >= ZMIN && x + OX < W && z + OZ < D;
 
 function getB(x, y, z) {
+  x += OX; z += OZ;
   if (y < 0) return B.STONE;
   if (x < 0 || y >= H || z < ZMIN || x >= W || z >= D) return B.AIR;
   return world[(y * DT + z - ZMIN) * W + x];
 }
-function setRaw(x, y, z, b) { if (x < 0 || y < 0 || z < ZMIN || x >= W || y >= H || z >= D) return; world[(y * DT + z - ZMIN) * W + x] = b; }
+function setRaw(x, y, z, b) { x += OX; z += OZ; if (x < 0 || y < 0 || z < ZMIN || x >= W || y >= H || z >= D) return; world[(y * DT + z - ZMIN) * W + x] = b; }
 function fill(x0, y0, z0, x1, y1, z1, b) {
   for (let y = Math.min(y0, y1); y <= Math.max(y0, y1); y++)
     for (let z = Math.min(z0, z1); z <= Math.max(z0, z1); z++)
@@ -524,8 +527,9 @@ function lawn(x0, z0, x1, z1, axis, w) {
 // Each place has a footprint (for "you are here"), a label, and somewhere to stand when you go there.
 const PLACES = [];
 function place(name, x0, z0, x1, z1, o) {
-  const P0 = Object.assign({ name, x0, z0, x1, z1, cx: (x0 + x1 + 1) / 2, cz: (z0 + z1 + 1) / 2 }, o || {});
-  if (P0.label) { P0.cx = P0.label[0]; P0.cz = P0.label[1]; }
+  const P0 = Object.assign({ name, x0: x0 + OX, z0: z0 + OZ, x1: x1 + OX, z1: z1 + OZ, cx: (x0 + x1 + 1) / 2 + OX, cz: (z0 + z1 + 1) / 2 + OZ }, o || {});
+  if (P0.label) { P0.cx = P0.label[0] + OX; P0.cz = P0.label[1] + OZ; }
+  if (P0.walk) P0.walk = [P0.walk[0] + OX, P0.walk[1] + OZ, P0.walk[2]];
   PLACES.push(P0); const id = PLACES.length;
   for (let z = z0; z <= z1; z++) for (let x = x0; x <= x1; x++) if (inWorld(x, z)) area[ai(x, z)] = id;
   return P0;
@@ -674,158 +678,222 @@ function soffit(x0, z0, x1, z1, y0, mat) {
   const roof = new Set([B.SLATEW, B.CLAYW, B.BROOFW]);
   for (let y = y0; y < Math.min(H, y0 + 22); y++) for (let z = z0 + 1; z <= z1 - 1; z++) for (let x = x0 + 1; x <= x1 - 1; x++) {
     if (getB(x, y, z) !== B.AIR) continue;
+    let covered = false; for (let yy = y + 1; yy < Math.min(H, y + 14); yy++) if (roof.has(getB(x, yy, z))) { covered = true; break; }
+    if (!covered) continue;   // only under the roof, never on top of it
     if (roof.has(getB(x + 1, y, z)) || roof.has(getB(x - 1, y, z)) || roof.has(getB(x, y, z + 1)) || roof.has(getB(x, y, z - 1))) setRaw(x, y, z, mat);
   }
 }
+// ════════════════════════════════════════════════════════════════
+// LUDGROVE
+// Laid out from the satellite view at about one block per metre (north is -z).
+// Buildings designed earlier are moved into place with at(dx, dz, ...).
+// ════════════════════════════════════════════════════════════════
+function at(dx, dz, fn) { OX = dx; OZ = dz; try { fn(); } finally { OX = 0; OZ = 0; } }
+// Smooth value noise, 0..1
+function vnoise(x, z) {
+  const h = (i, j) => { let n = i * 374761393 + j * 668265263; n = (n ^ (n >>> 13)) * 1274126177; return ((n ^ (n >>> 16)) >>> 0) / 4294967295; };
+  const i = Math.floor(x), j = Math.floor(z), fx = x - i, fz = z - j, sx = fx * fx * (3 - 2 * fx), sz = fz * fz * (3 - 2 * fz);
+  const a = h(i, j), b = h(i + 1, j), c = h(i, j + 1), d = h(i + 1, j + 1);
+  return a + (b - a) * sx + (c - a) * sz + (a - b - c + d) * sx * sz;
+}
+const hash2 = (x, z) => { let n = x * 73856093 ^ z * 19349663; n = (n ^ (n >>> 13)) * 1274126177; return ((n ^ (n >>> 16)) >>> 0) / 4294967295; };
+// A continuous woodland canopy: leaves from 3 blocks up, a bumpy top, trunks here and there, patches of pine
+function canopy(x0, z0, x1, z1, keep) {
+  for (let z = Math.max(0, z0); z <= Math.min(D - 1, z1); z++) for (let x = Math.max(0, x0); x <= Math.min(W - 1, x1); x++) {
+    if (reserved[ai(x, z)] || (keep && !keep(x, z))) continue;
+    const g0 = getB(x, G - 1, z); if ((g0 !== B.GRASS && g0 !== B.DRY && g0 !== B.DRYLAWN) || getB(x, G, z) !== B.AIR) continue;
+    const top = G + 5 + Math.floor(vnoise(x / 7, z / 7) * 4 + vnoise(x / 2.5, z / 2.5) * 2);
+    const leaf = vnoise(x / 23 + 50, z / 23) > 0.66 ? B.PINE : B.OAK;
+    const bottom = G + 3 + (hash2(x, z) < 0.3 ? 1 : 0);
+    for (let y = bottom; y <= top; y++) setRaw(x, y, z, leaf);
+    if (hash2(x + 7, z * 3) < 0.03) for (let y = G; y < bottom + 1; y++) setRaw(x, y, z, B.LOG);
+  }
+}
+// A belt of trees along a line of points
+function belt(pts, width) {
+  const near = (x, z) => {
+    for (let i = 0; i + 1 < pts.length; i++) {
+      const [ax, az] = pts[i], [bx, bz] = pts[i + 1], dx = bx - ax, dz = bz - az, L = dx * dx + dz * dz;
+      const t = Math.max(0, Math.min(1, ((x - ax) * dx + (z - az) * dz) / L));
+      if (Math.hypot(x - ax - t * dx, z - az - t * dz) <= width / 2 + (vnoise(x / 6, z / 6) - 0.5) * 4) return true;
+    }
+    return false;
+  };
+  let x0 = 1e9, x1 = -1e9, z0 = 1e9, z1 = -1e9;
+  for (const [x, z] of pts) { x0 = Math.min(x0, x); x1 = Math.max(x1, x); z0 = Math.min(z0, z); z1 = Math.max(z1, z); }
+  canopy(Math.floor(x0 - width), Math.floor(z0 - width), Math.ceil(x1 + width), Math.ceil(z1 + width), near);
+}
+// A thick line of ground blocks (roads and paths)
+function roadLine(pts, width, mat) {
+  for (let i = 0; i + 1 < pts.length; i++) {
+    const [ax, az] = pts[i], [bx, bz] = pts[i + 1], n = Math.ceil(Math.hypot(bx - ax, bz - az) * 2);
+    for (let k = 0; k <= n; k++) {
+      const x = ax + (bx - ax) * k / n, z = az + (bz - az) * k / n, r = width / 2;
+      for (let dz = -r; dz <= r; dz++) for (let dx = -r; dx <= r; dx++) if (dx * dx + dz * dz <= r * r + 0.5) ground(Math.round(x + dx), Math.round(z + dz), Math.round(x + dx), Math.round(z + dz), mat);
+    }
+  }
+}
+const ROAD = [[0, 9], [160, 6], [310, 14], [462, 40], [585, 51], [687, 58]];
+const roadZ = x => { for (let i = 0; i + 1 < ROAD.length; i++) { const [ax, az] = ROAD[i], [bx, bz] = ROAD[i + 1]; if (x >= ax && x <= bx) return az + (bz - az) * (x - ax) / (bx - ax); } return 58; };
+// Clipped round topiary on a short trunk, as along the avenue
+function topiary(x, z) { setRaw(x, G, z, B.LOG); for (let dy = 1; dy <= 3; dy++) for (let dz = -1; dz <= 1; dz++) for (let dx = -1; dx <= 1; dx++) if (Math.abs(dx) + Math.abs(dz) + (dy === 2 ? 0 : 1) <= 2) setRaw(x + dx, G + dy, z + dz, B.HEDGE); reserve(x - 1, z - 1, x + 1, z + 1); }
+function pavilion(dx, dz, small) {
+  at(dx, dz, () => {
+    if (!small) {
+      shell(100, -6, 110, 0, 4, B.BRICK, { rows: [1, 2], step: 2, floor: B.PLANKS });
+      gable(100, -6, 110, 0, G + 4, 'x', B.CLAY, B.BRICK);
+      fill(99, G - 1, -9, 111, G - 1, -7, B.PLANKS);
+      [99, 104, 106, 111].forEach(x => fill(x, G, -9, x, G + 2, -9, B.RENDER));
+      fill(99, G + 3, -9, 111, G + 3, -7, B.CLAY);
+      fill(100, G, -9, 103, G, -9, B.PICKET); fill(107, G, -9, 110, G, -9, B.PICKET);
+      door(104, -6, 'x', 2);
+      fill(101, G, -5, 101, G, -1, B.DARK); fill(109, G, -5, 109, G, -1, B.DARK);
+      reserve(98, -10, 112, 1);
+    } else {
+      shell(101, -31, 107, -27, 4, B.BRICK, { rows: [1, 2], step: 2, floor: B.PLANKS });
+      gable(101, -31, 107, -27, G + 4, 'z', B.CLAY, B.BRICK); door(104, -31, 'x', 1);
+      reserve(100, -32, 108, -26);
+    }
+  });
+}
+function cars(x0, z0, x1, z1, axis, gap) {
+  const cols = [B.MACHINE, B.LEAD, B.RENDER, B.DADO, B.TEAL];
+  let k = 0;
+  if (axis === 'x') { for (let x = x0; x + 1 <= x1; x += gap) { if (hash2(x, z0) < 0.7) fill(x, G, z0, x + 1, G, z0 + 3, cols[k++ % cols.length]); } }
+  else { for (let z = z0; z + 1 <= z1; z += gap) { if (hash2(x0, z) < 0.7) fill(x0, G, z, x0 + 3, G, z + 1, cols[k++ % cols.length]); } }
+}
+
 function buildSchool() {
   seed = 1892;
   world.fill(0); reserved.fill(0); area.fill(0); PLACES.length = 0;
-  fill(0, 0, ZMIN, W - 1, 1, D - 1, B.STONE);
-  fill(0, 2, ZMIN, W - 1, G - 2, D - 1, B.DIRT);
-  fill(0, G - 1, ZMIN, W - 1, G - 1, D - 1, B.GRASS);
+  fill(0, 0, 0, W - 1, 1, D - 1, B.STONE);
+  fill(0, 2, 0, W - 1, G - 2, D - 1, B.DIRT);
+  fill(0, G - 1, 0, W - 1, G - 1, D - 1, B.GRASS);
 
-  // ── North of the woods: crops, and the main pitches with their pavilions ──
-  for (let z = -18; z <= 9; z++) for (let x = 22; x <= 94; x++) setRaw(x, G - 1, z, (x % 4 === 0) ? B.DIRT : B.CROP);
-  reserve(22, -18, 94, 9);
-  place('Pavilions & Main Pitches', 96, ZMIN, W - 1, 9, { walk: [124.5, 3.5, 0], label: [130, -14] });
-  for (let z = ZMIN; z <= 9; z++) for (let x = 96; x < W; x++) setRaw(x, G - 1, z, Math.floor(x / 5) % 2 ? B.DRY : B.DRYLAWN);
-  reserve(96, ZMIN, W - 1, 9);
-  // (pitch markings, posts and sightscreens are drawn by markPitches for the chosen sport)
-  // The main pavilion: red brick, clay tiles, white veranda facing the square
-  shell(100, -6, 110, 0, 4, B.BRICK, { rows: [1, 2], step: 2, floor: B.PLANKS });
-  gable(100, -6, 110, 0, G + 4, 'x', B.CLAY, B.BRICK);
-  fill(99, G - 1, -9, 111, G - 1, -7, B.PLANKS);
-  [99, 104, 106, 111].forEach(x => fill(x, G, -9, x, G + 2, -9, B.RENDER));
-  fill(99, G + 3, -9, 111, G + 3, -7, B.CLAY);
-  fill(100, G, -9, 103, G, -9, B.PICKET); fill(107, G, -9, 110, G, -9, B.PICKET);
-  door(104, -6, 'x', 2);
-  fill(101, G, -5, 101, G, -1, B.DARK); fill(109, G, -5, 109, G, -1, B.DARK);   // changing-room benches
-  // A smaller pavilion on the west side
-  shell(101, -31, 107, -27, 4, B.BRICK, { rows: [1, 2], step: 2, floor: B.PLANKS });
-  gable(101, -31, 107, -27, G + 4, 'z', B.CLAY, B.BRICK); door(107, -29, 'z', 1);
-  [[112, 6], [140, 7], [166, 7], [98, -18], [175, -14]].forEach(([x, z]) => chestnut(x, z));   // horse chestnuts round the edges
-  [[113, 2], [141, 3]].forEach(([x, z]) => fill(x, G, z, x + 1, G, z, B.PLANKS));   // benches under the chestnuts
+  // ── Farmland: crop rows east and south-east of the school ──
+  for (let z = 40; z < D; z++) for (let x = 655; x < W; x++) setRaw(x, G - 1, z, (x % 4 === 0) ? B.DIRT : B.CROP);
+  for (let z = 318; z < D; z++) for (let x = 472; x < 655; x++) setRaw(x, G - 1, z, (z % 46 === 0 || x % 60 === 0) ? B.DIRT : ((x + (z > 470 ? 2 : 0)) % 4 === 0 ? B.DIRT : B.CROP));
+  reserve(655, 40, W - 1, D - 1); reserve(472, 318, 654, D - 1);
+  // Dry grass on the open land south and west
+  for (let z = 418; z < D; z++) for (let x = 0; x < 472; x++) setRaw(x, G - 1, z, vnoise(x / 30, z / 30) > 0.45 ? B.DRY : B.DRYLAWN);
 
-  // ── Top Lawn ──
-  place('Top Lawn', 2, 54, 52, 118, { walk: [28.5, 86.5, 0] });
-  lawn(4, 56, 51, 117, 'x', 3);
-  reserve(4, 56, 51, 117);
-  tree(14, 66, 'oak'); tree(10, 100, 'oak'); tree(34, 112, 'birch'); tree(6, 82, 'pine');
+  // ── The road along the north, the drive, the lane and the car parks ──
+  roadLine(ROAD, 6, B.TARMAC);
+  ground(461, 40, 468, 108, B.TARMAC);                          // the drive down to the house
+  ground(578, 51, 586, 84, B.TARMAC);                           // the east entrance
+  ground(531, 64, 586, 84, B.TARMAC); cars(533, 66, 574, 66, 'x', 3); cars(533, 79, 574, 79, 'x', 3);
+  ground(474, 69, 494, 106, B.TARMAC); cars(476, 72, 476, 100, 'z', 3);
+  ground(474, 104, 562, 116, B.TARMAC); cars(505, 107, 545, 107, 'x', 4);
+  ground(530, 84, 533, 120, B.TARMAC);
+  ground(561, 104, 566, 306, B.TARMAC);                         // the lane south past the chapel to the Astro
+  ground(581, 124, 600, 135, B.TARMAC);
+  ground(487, 168, 557, 169, B.PAVE);                           // along the front of the main building
+  ground(495, 176, 513, 177, B.PAVE);
 
-  // ── Camps ──
-  place('Camps', 0, 119, 40, 143, { walk: [16.5, 130.5, 0] });
-  ground(10, 124, 26, 136, B.DIRT);
-  const shelter = (x, z) => { for (let i = 0; i < 4; i++) fill(x, G + i, z + i, x + 4, G + i, z + i, B.LOG); fill(x, G, z, x, G + 3, z, B.LOG); fill(x + 4, G, z, x + 4, G + 3, z, B.LOG); };
-  shelter(11, 125); shelter(20, 125); shelter(12, 132);
-  setRaw(18, G - 1, 131, B.EMBER); setRaw(18, G, 131, B.FIRE);
-  [[16, 131], [20, 131], [18, 129], [18, 133]].forEach(([x, z]) => setRaw(x, G, z, B.LOG));
-
-  // ── Front of House: pea-gravel forecourt, a lawn with the great cedar and a box parterre ──
-  place('Front of House', 10, 20, 33, 52, { walk: [24.5, 47.5, Math.PI * 0.55], label: [22, 44] });
-  ground(10, 20, 33, 52, B.PEA);
-  for (let z = 20; z <= 52; z++) for (let x = 10; x <= 33; x++) if (((x - 19) / 8) ** 2 + ((z - 31) / 9) ** 2 < 1) setRaw(x, G - 1, z, B.DRYLAWN);
-  cedar(18, 28);
-  // Clipped box squares on the lawn, as in the photo
-  [[20, 34], [24, 30], [14, 35]].forEach(([x, z]) => { ring(x, z, x + 2, z + 2, G, G, B.HEDGE); setRaw(x + 1, G - 1, z + 1, B.FLOWERS); });
-  [[13, 24], [25, 25]].forEach(([x, z]) => fill(x, G, z, x + 1, G, z + 1, B.HEDGE));
-  ground(12, 53, 18, 143, B.PEA);   // the drive south past the Top Lawn
-  for (let z = 53; z < 119; z++) for (let x = 12; x <= 18; x++) area[ai(x, z)] = 0;
-  lawn(4, 56, 11, 117, 'x', 3); lawn(19, 56, 51, 117, 'x', 3);
-  for (let z = 62; z < 116; z += 9) fill(46, G - 1, z, 50, G - 1, z + 5, B.FLOWERS);
-
-  // ── The avenue, the lane and the paths ──
-  ground(54, 62, 59, 143, B.GRAVEL);
-  hedgeLine(52, 64, 53, 128, 2); hedgeLine(60, 64, 61, 100, 2);
-  for (let z = 66; z <= 128; z += 6) tree(51, z, 'oak');
-  ground(121, 40, 123, 143, B.TARMAC); ground(117, 51, 120, 143, B.TARMAC);
-  ground(124, 53, 152, 53, B.TARMAC);
-  ground(44, 37, 128, 39, B.GRAVEL);
-  ground(46, 53, 116, 54, B.PAVE);
-  ground(54, 61, 72, 62, B.PAVE);
-
-  // ── Chapel Ground: dry summer grass, a cricket square, the nets, staff houses on the far side ──
-  place('Chapel Ground', 126, 64, 173, 124, { walk: [138.5, 92.5, Math.PI / 2] });
-  for (let z = 64; z <= 124; z++) for (let x = 126; x < W; x++) setRaw(x, G - 1, z, Math.floor(z / 4) % 2 ? B.DRY : B.DRYLAWN);
-  reserve(126, 64, W - 1, 124);
-  // Cricket nets: a green cage with three lanes
-  fill(156, G - 1, 66, 170, G - 1, 74, B.COURT);
-  ring(156, 66, 170, 74, G, G + 3, B.CNET); fill(156, G + 4, 66, 170, G + 4, 74, B.CNET);
-  fill(160, G, 67, 160, G + 3, 73, B.CNET); fill(165, G, 67, 165, G + 3, 73, B.CNET);
-  fill(156, G, 70, 156, G + 1, 71, B.AIR);
-  // Staff houses with a white picket fence
-  for (const hz of [104, 114]) {
-    shell(161, hz, 171, hz + 7, 6, B.BRICK, { rows: [1, 2, 4], step: 2 });
-    gable(161, hz, 171, hz + 7, G + 6, 'z', B.SLATE, B.BRICK);
-    chimney(166, hz + 3, G + 12, 2); door(161, hz + 3, 'z', 1);
+  // ── Front of House: the drive opens onto a pea-gravel forecourt; the great cedar on its lawn; the round parterre ──
+  place('Front of House', 446, 108, 477, 172, { walk: [470.5, 168.5, -Math.PI * 0.25], label: [462, 124] });
+  ground(446, 108, 477, 172, B.PEA);
+  for (let z = 132; z <= 160; z++) for (let x = 444; x <= 461; x++) if (((x - 452) / 8.5) ** 2 + ((z - 146) / 13) ** 2 < 1) setRaw(x, G - 1, z, B.DRYLAWN);
+  cedar(452, 146);
+  for (let z = 128; z <= 154; z++) for (let x = 419; x <= 445; x++) {
+    const r = Math.hypot(x - 432, z - 141);
+    if (r > 12) continue;
+    let b = B.GRASS;
+    if (r < 2.2) b = B.FLOWERS; else if (r > 6.6 && r < 9.4) b = B.FLOWERS;
+    if (Math.abs(x - 432) <= 0 || Math.abs(z - 141) <= 0) b = B.PAVE;
+    setRaw(x, G - 1, z, b);
+    if ((Math.abs(r - 10) < 0.6 || Math.abs(r - 6) < 0.6) && x !== 432 && z !== 141) setRaw(x, G, z, B.HEDGE);
   }
-  fill(158, G, 102, 158, G, 123, B.PICKET); fill(158, G, 108, 158, G, 109, B.AIR); fill(158, G, 118, 158, G, 119, B.AIR);
-  fill(159, G - 1, 102, 160, G - 1, 123, B.PEA);
-  fill(159, G, 104, 160, G, 106, B.MACHINE); fill(159, G, 112, 160, G, 114, B.LEAD);   // parked cars by the houses
+  reserve(418, 127, 446, 155);
+  // The garden and house in the clearing to the north-west
+  for (let z = 49; z <= 89; z++) for (let x = 387; x <= 427; x++) setRaw(x, G - 1, z, B.LAWN);
+  reserve(385, 47, 445, 91);
+  shell(430, 66, 442, 78, 6, B.BRICK, { rows: [1, 2, 4], step: 2 }); gable(430, 66, 442, 78, G + 6, 'z', B.SLATE, B.BRICK); chimney(436, 72, G + 12, 2);
 
-  // ── Tennis Courts ──
-  place('Tennis Courts', 62, 24, 96, 36, { walk: [79.5, 38.5, 0] });
-  ground(62, 24, 96, 36, B.COURT);
-  for (const [a, b] of [[63, 78], [80, 95]]) {
-    for (let x = a; x <= b; x++) [25, 35, 27, 33, 30].forEach(z => setRaw(x, G - 1, z, B.CLINE));
-    for (let z = 25; z <= 35; z++) { setRaw(a, G - 1, z, B.CLINE); setRaw(b, G - 1, z, B.CLINE); }
-    const m = Math.floor((a + b) / 2);
-    for (let z = 27; z <= 33; z++) { setRaw(a + 4, G - 1, z, B.CLINE); setRaw(b - 4, G - 1, z, B.CLINE); }
-    fill(m, G, 24, m, G, 36, B.NET); setRaw(m, G, 24, B.RENDER); setRaw(m, G, 36, B.RENDER);
+  // ── The north range by the road, and the house at its west end ──
+  shell(493, 52, 557, 60, 7, B.BRICK, { rows: [1, 2, 4, 5] }); gable(493, 52, 557, 60, G + 7, 'x', B.SLATE, B.BRICK);
+  for (let x = 497; x <= 553; x += 6) { fill(x, G + 7, 61, x + 2, G + 8, 61, B.RENDER); setRaw(x + 1, G + 7, 61, B.WINDOW); }
+  chimney(510, 56, G + 11, 3); chimney(540, 56, G + 11, 3); door(525, 60, 'x', 2);
+  shell(470, 57, 491, 68, 7, B.BRICK, { rows: [1, 2, 4, 5], step: 2, upper: B.TIMBER, upperFrom: 4 }); gable(470, 57, 491, 68, G + 7, 'x', B.SLATE, B.BRICK);
+  gable(476, 64, 484, 70, G + 6, 'z', B.SLATE, B.TIMBER); chimney(474, 62, G + 12, 2); door(480, 68, 'x', 1);
+
+  // ── Tennis Courts: two hard courts, one above the other ──
+  place('Tennis Courts', 495, 66, 528, 103, { walk: [511.5, 107.5, 0] });
+  ground(495, 66, 528, 103, B.COURT);
+  for (const [c0, c1] of [[67, 84], [85, 102]]) {
+    const zA = c0 + 2, zB = c1 - 2, zm = Math.round((zA + zB) / 2);
+    for (let x = 498; x <= 525; x++) { setRaw(x, G - 1, zA, B.CLINE); setRaw(x, G - 1, zB, B.CLINE); setRaw(x, G - 1, zA + 2, B.CLINE); setRaw(x, G - 1, zB - 2, B.CLINE); }
+    for (let z = zA; z <= zB; z++) { setRaw(498, G - 1, z, B.CLINE); setRaw(525, G - 1, z, B.CLINE); }
+    for (let z = zA + 2; z <= zB - 2; z++) { setRaw(505, G - 1, z, B.CLINE); setRaw(518, G - 1, z, B.CLINE); }
+    for (let x = 505; x <= 518; x++) setRaw(x, G - 1, zm, B.CLINE);
+    fill(511, G, zA - 1, 511, G, zB + 1, B.NET); setRaw(511, G, zA - 1, B.RENDER); setRaw(511, G, zB + 1, B.RENDER);
   }
-  ring(61, 23, 97, 37, G, G + 2, B.NET); fill(78, G, 37, 80, G + 2, 37, B.AIR);
-  reserve(60, 22, 98, 38);
+  ring(495, 66, 528, 103, G, G + 2, B.NET); fill(510, G, 103, 512, G + 2, 103, B.AIR);
 
-  // ── Older buildings behind the courts ──
-  shell(62, 12, 96, 21, 7, B.BRICK, { rows: [1, 2, 4, 5] });
-  gable(62, 12, 96, 21, G + 7, 'x', B.SLATE, B.BRICK);
-  for (let x = 66; x <= 92; x += 6) { fill(x, G + 7, 11, x + 2, G + 8, 11, B.RENDER); setRaw(x + 1, G + 7, 11, B.WINDOW); }
-  chimney(70, 16, G + 11, 3); chimney(88, 17, G + 11, 3);
-  shell(46, 24, 58, 35, 6, B.BRICK); gable(46, 24, 58, 35, G + 6, 'z', B.SLATE, B.BRICK); door(52, 35, 'x', 2);
-  shell(48, 14, 58, 21, 5, B.BRICK); gable(48, 14, 58, 21, G + 5, 'x', B.SLATE, B.BRICK);
+  // ── Sports Hall: pale cladding on a brick base, a glazed entrance on the south side ──
+  place('Sports Hall', 534, 85, 579, 106, { walk: [556.5, 109.5, 0] });
+  shell(534, 85, 579, 103, 11, B.CLAD, { floor: B.SPORT, rows: [], plinth: false });
+  for (let y = G; y < G + 4; y++) ring(534, 85, 579, 103, y, y, B.BRICK);
+  fill(534, G + 11, 85, 579, G + 11, 103, B.CLAD);
+  for (let x = 537; x <= 576; x++) { setRaw(x, G - 1, 87, B.LINE); setRaw(x, G - 1, 101, B.LINE); }
+  for (let z = 87; z <= 101; z++) { setRaw(537, G - 1, z, B.LINE); setRaw(576, G - 1, z, B.LINE); setRaw(556, G - 1, z, B.LINE); }
+  for (const hx of [535, 578]) fill(hx, G + 5, 93, hx, G + 5, 95, B.RENDER);
+  shell(551, 101, 561, 106, 6, B.BRICK, { rows: [] });
+  fill(554, G + 1, 106, 558, G + 4, 106, B.GLASS); door(555, 106, 'x', 3); fill(553, G, 103, 559, G + 1, 103, B.AIR);
+  fill(551, G + 6, 101, 561, G + 6, 106, B.LEAD);
+  // The low block between the Sports Hall and the pool, solar panels on its flat roof
+  shell(562, 104, 579, 118, 4, B.BRICK, { rows: [1, 2], step: 3 });
+  fill(562, G + 4, 104, 579, G + 4, 118, B.LEAD);
+  for (let x = 564; x <= 577; x += 3) fill(x, G + 5, 106, x + 1, G + 5, 116, B.SOLAR);
+  door(562, 110, 'z', 2);
 
-  // ── Sports Hall ──
-  place('Sports Hall', 98, 20, 128, 38, { walk: [113.5, 39.5, 0] });
-  shell(98, 20, 128, 36, 11, B.CLAD, { floor: B.SPORT, rows: [], plinth: false });
-  for (let y = G; y < G + 4; y++) ring(98, 20, 128, 36, y, y, B.BRICK);
-  shell(104, 33, 112, 38, 6, B.BRICK, { rows: [] });
-  fill(107, G + 1, 38, 109, G + 4, 38, B.GLASS); fill(106, G + 4, 38, 110, G + 4, 38, B.BRICK); fill(107, G + 5, 38, 109, G + 5, 38, B.BRICK);
-  door(107, 38, 'x', 3); fill(107, G, 36, 109, G + 1, 36, B.AIR);
-  fill(104, G + 6, 33, 112, G + 6, 38, B.LEAD);
-  fill(98, G + 11, 20, 128, G + 11, 36, B.LEAD); fill(100, G + 12, 22, 126, G + 12, 34, B.SOLAR);
-  for (let x = 100; x <= 126; x++) { setRaw(x, G - 1, 22, B.LINE); setRaw(x, G - 1, 34, B.LINE); }
-  for (let z = 22; z <= 34; z++) { setRaw(100, G - 1, z, B.LINE); setRaw(126, G - 1, z, B.LINE); setRaw(113, G - 1, z, B.LINE); }
-  for (const hx of [99, 127]) fill(hx, G + 5, 27, hx, G + 5, 29, B.RENDER);
+  // ── Swimming Pool: white tiles with teal bands, two lantern lights, glazed doors to the garden ──
+  place('Swimming Pool', 580, 94, 597, 123, { walk: [588.5, 127.5, 0] });
+  shell(580, 94, 597, 123, 6, B.BRICK, { floor: B.TILEF, rows: [1, 2, 3], step: 2 });
+  gable(580, 94, 597, 123, G + 6, 'z', B.SLATE, B.BRICK);
+  fill(583, G - 3, 97, 594, G - 1, 120, B.POOLT);
+  fill(584, G - 2, 98, 593, G - 1, 119, B.WATER);
+  for (const x of [586, 588, 591]) fill(x, G - 3, 99, x, G - 3, 118, B.TEAL);
+  door(587, 123, 'x', 2);
+  fill(597, G, 104, 597, G + 3, 112, B.WFRAME); fill(597, G, 107, 597, G + 1, 109, B.AIR);
+  lineIn(580, 94, 597, 123, G, G, B.WTILE); lineIn(580, 94, 597, 123, G + 1, G + 1, B.TEAL);
+  lineIn(580, 94, 597, 123, G + 2, G + 3, B.WTILE); lineIn(580, 94, 597, 123, G + 4, G + 4, B.TEAL);
+  fill(581, G + 5, 95, 596, G + 5, 122, B.CEIL);
+  for (const lz of [99, 112]) { fill(585, G + 5, lz, 591, G + 5, lz + 6, B.AIR); ring(585, lz, 591, lz + 6, G + 6, G + 6, B.CEIL); fill(586, G + 7, lz + 1, 590, G + 7, lz + 5, B.LANTERN); }
+  fill(581, G, 95, 581, G, 96, B.DARK); fill(596, G, 121, 596, G, 122, B.DARK);
 
-  // ── Swimming Pool: white tiles with teal bands, lantern skylights, glazed doors to the garden ──
-  place('Swimming Pool', 129, 30, 153, 44, { walk: [140.5, 47.5, Math.PI] });
-  shell(129, 30, 153, 44, 6, B.BRICK, { floor: B.TILEF, rows: [1, 2, 3], step: 2 });
-  gable(129, 30, 153, 44, G + 6, 'x', B.SLATE, B.BRICK);
-  fill(132, G - 3, 33, 150, G - 1, 41, B.POOLT);
-  fill(133, G - 2, 34, 149, G - 1, 40, B.WATER);
-  for (const z of [35, 37, 39]) fill(134, G - 3, z, 148, G - 3, z, B.TEAL);
-  door(140, 44, 'x', 2);
-  fill(153, G, 34, 153, G + 3, 40, B.WFRAME); fill(153, G, 36, 153, G + 1, 38, B.AIR);
-  lineIn(129, 30, 153, 44, G, G, B.WTILE); lineIn(129, 30, 153, 44, G + 1, G + 1, B.TEAL);
-  lineIn(129, 30, 153, 44, G + 2, G + 3, B.WTILE); lineIn(129, 30, 153, 44, G + 4, G + 4, B.TEAL);
-  fill(130, G + 5, 31, 152, G + 5, 43, B.CEIL);
-  for (const lx of [134, 144]) {   // two lantern lights in the ceiling
-    fill(lx, G + 5, 34, lx + 4, G + 5, 40, B.AIR); ring(lx, 34, lx + 4, 40, G + 6, G + 6, B.CEIL); fill(lx + 1, G + 7, 35, lx + 3, G + 7, 39, B.LANTERN);
-  }
-  fill(130, G, 31, 131, G, 31, B.DARK); fill(151, G, 43, 152, G, 43, B.DARK);   // poolside benches
+  // ── The ranges round the inner courtyard behind the front of the main building ──
+  shell(478, 110, 500, 152, 8, B.BRICK, { rows: [1, 2, 5, 6], upper: B.TIMBER, upperFrom: 5 });
+  gable(478, 110, 500, 152, G + 8, 'z', B.SLATEW, B.TIMBER);
+  fill(479, G + 4, 111, 499, G + 4, 151, B.UPFLOOR); lineIn(478, 110, 500, 152, G, G + 3, B.CREAM); lineIn(478, 110, 500, 152, G + 5, G + 7, B.CREAM);
+  door(478, 128, 'z', 2); door(500, 140, 'z', 2); door(489, 110, 'x', 2);
+  shell(500, 117, 561, 132, 8, B.BRICK, { rows: [1, 2, 5, 6] });
+  gable(500, 117, 561, 132, G + 8, 'x', B.SLATEW, B.BRICK);
+  fill(501, G + 4, 118, 560, G + 4, 131, B.UPFLOOR); lineIn(500, 117, 561, 132, G, G + 3, B.CREAM); lineIn(500, 117, 561, 132, G + 5, G + 7, B.CREAM);
+  door(530, 132, 'x', 2); door(530, 117, 'x', 2);
+  for (const cx of [510, 525, 545]) { chimney(cx, 118, G + 15, 3); }
+  shell(546, 132, 561, 155, 8, B.BRICK, { rows: [1, 2, 5, 6] });
+  gable(546, 132, 561, 155, G + 8, 'z', B.SLATEW, B.BRICK);
+  fill(547, G + 4, 133, 560, G + 4, 154, B.UPFLOOR); lineIn(546, 132, 561, 155, G, G + 3, B.CREAM); lineIn(546, 132, 561, 155, G + 5, G + 7, B.CREAM);
+  door(546, 143, 'z', 2); door(561, 143, 'z', 2);
+  ground(501, 133, 545, 154, B.TARMAC); cars(505, 135, 540, 135, 'x', 4);
+  soffit(478, 110, 500, 152, G + 8, B.CREAM); soffit(500, 117, 561, 132, G + 8, B.CREAM); soffit(546, 132, 561, 155, G + 8, B.CREAM);
+  // A range along the lane behind the Library
+  shell(556, 167, 561, 185, 7, B.BRICK, { rows: [1, 2, 4, 5], step: 2 }); gable(556, 167, 561, 185, G + 7, 'z', B.SLATE, B.BRICK);
 
-  // ── Eton Fives: open-fronted concrete courts, brick piers, a white pergola over them ──
-  place('Fives', 121, 44, 134, 52, { walk: [122.2, 48.5, Math.PI / 2] });
-  fill(124, G - 1, 44, 134, G - 1, 52, B.CONCRETE);
-  fill(134, G, 44, 134, G + 3, 52, B.CONCRETE);
-  fill(125, G, 44, 134, G + 3, 44, B.CONCRETE); fill(125, G, 52, 134, G + 3, 52, B.CONCRETE); fill(126, G, 48, 134, G + 3, 48, B.CONCRETE);
-  fill(130, G, 45, 133, G, 47, B.CONCRETE); fill(130, G, 49, 133, G, 51, B.CONCRETE);   // the raised back step of each court
-  setRaw(129, G, 46, B.CONCRETE);                                                        // the buttress ("pepper")
-  setRaw(129, G, 50, B.CONCRETE);
-  [44, 48, 52].forEach(z => fill(124, G, z, 124, G + 3, z, B.BRICK));
-  ring(123, 43, 134, 53, G + 4, G + 4, B.RENDER);
-  for (let x = 124; x <= 133; x += 2) fill(x, G + 4, 44, x, G + 4, 52, B.RENDER);
-  reserve(122, 42, 136, 54);
+  // ── Top Lawn, with its round garden ──
+  place('Top Lawn', 421, 173, 493, 218, { walk: [457.5, 205.5, 0] });
+  lawn(421, 173, 493, 218, 'x', 3);
+  for (let z = 188; z <= 204; z++) for (let x = 459; x <= 475; x++) { const r = Math.hypot(x - 467, z - 196); if (r < 4) setRaw(x, G - 1, z, B.FLOWERS); else if (r < 5) setRaw(x, G - 1, z, B.PAVE); if (Math.abs(r - 6.5) < 0.55 && z !== 196) setRaw(x, G, z, B.HEDGE); }
+  for (let a = -0.7; a <= 0.7; a += 0.35) fill(Math.round(466 + Math.sin(a) * 12), G, Math.round(178 + (1 - Math.cos(a)) * 3), Math.round(467 + Math.sin(a) * 12), G, Math.round(178 + (1 - Math.cos(a)) * 3), B.PLANKS);
+  reserve(421, 173, 493, 218);
+  tree(430, 180, 'oak'); tree(486, 213, 'oak'); tree(440, 214, 'birch'); tree(426, 206, 'pine');
 
+  // ── The avenue: a gravel walk between rows of clipped round trees ──
+  ground(496, 178, 501, 248, B.GRAVEL);
+  for (let z = 180; z <= 246; z += 4) { topiary(494, z); topiary(503, z); }
+
+  at(441, 115, () => {
   // ── Main building: Dormitories above, classrooms and the Games Room below ──
   place('Dormitories', 44, 40, 120, 52, { walk: [100.5, 55.5, 0], label: [70, 45] });
   const DH = 10;
@@ -904,7 +972,6 @@ function buildSchool() {
   door(99, 52, 'x', 2); door(115, 52, 'x', 1);
   // Creeper and wisteria up the front, as in the panorama
   for (const [x0, x1] of [[57, 61], [65, 69], [97, 101]]) for (let x = x0; x <= x1; x++) for (let y = G; y <= G + 3; y++) if (getB(x, y, 52) === B.BRICK || getB(x, y, 52) === B.PLINTH) if ((x + y) % 3) setRaw(x, y, 52, B.CREEPER);
-
   // ── The Study: west wing, half-timbered gable to the forecourt ──
   place('Study', 33, 37, 44, 53, { walk: [30.5, 45.5, Math.PI / 2] });
   shell(34, 38, 45, 52, 9, B.BRICK, { upper: B.TIMBER, upperFrom: 4 });
@@ -918,7 +985,6 @@ function buildSchool() {
   for (let z = 39; z <= 51; z += 2) if (getB(35, G, z) === B.PANEL) fill(35, G, z, 35, G + 2, z, B.BOOKS);
   fill(38, G, 41, 41, G, 42, B.DARK); fill(38, G, 47, 41, G, 48, B.DARK);
   fill(35, G - 1, 39, 44, G - 1, 51, B.RCARPET);
-
   // ── Dining Hall: oak panelling, honours boards, white walls, dark trusses, pine floor ──
   place('Dining Hall', 44, 51, 72, 60, { walk: [60.5, 63.5, 0] });
   shell(50, 50, 72, 60, 6, B.BRICK, { rows: [1, 2, 3], step: 2, floor: B.PINEFL });
@@ -937,7 +1003,6 @@ function buildSchool() {
   door(46, 59, 'x', 2);
   fill(46, G, 55, 47, G, 57, B.TPALE);
   reserve(43, 52, 50, 60);
-
   // ── Quad ──
   place('Quad', 72, 54, 103, 68, { walk: [80.5, 57.5, Math.PI * 0.85] });
   lawn(72, 55, 103, 68, 'z', 2);
@@ -945,7 +1010,6 @@ function buildSchool() {
   for (let z = 64; z <= 68; z++) for (let x = 84 - (z - 64) * 2; x <= 85 + (z - 64) * 2; x++) setRaw(x, G - 1, z, B.PAVE);
   [[76, 58], [96, 58], [96, 64]].forEach(([x, z]) => fill(x, G, z, x + 2, G, z, B.PLANKS));
   reserve(72, 54, 103, 68);
-
   // ── Library: mint and cream walls, black shelving, mint tables, French doors to the Quad ──
   place('Library', 104, 52, 114, 68, { walk: [102.5, 60.5, Math.PI / 2] });
   shell(104, 52, 114, 68, 6, B.BRICK, { upper: B.TIMBER, upperFrom: 4, floor: B.CARPET });
@@ -960,7 +1024,26 @@ function buildSchool() {
   [[105, 62], [106, 64], [108, 63], [111, 64], [109, 65]].forEach(([x, z]) => setRaw(x, G, z, B.GCHAIR));
   fill(106, G, 54, 106, G, 56, B.TPALE); setRaw(106, G + 1, 55, B.SCREEN);
   chimney(109, 60, G + 11, 2);
+  soffit(50, 50, 72, 60, G + 6, B.PLASTER);
+  soffit(45, 40, 120, 50, G + 10, B.CREAM);
+  });
 
+  at(446, 80, () => {
+  // ── Eton Fives: open-fronted concrete courts, brick piers, a white pergola over them ──
+  place('Fives', 121, 44, 134, 52, { walk: [122.2, 48.5, Math.PI / 2] });
+  fill(124, G - 1, 44, 134, G - 1, 52, B.CONCRETE);
+  fill(134, G, 44, 134, G + 3, 52, B.CONCRETE);
+  fill(125, G, 44, 134, G + 3, 44, B.CONCRETE); fill(125, G, 52, 134, G + 3, 52, B.CONCRETE); fill(126, G, 48, 134, G + 3, 48, B.CONCRETE);
+  fill(130, G, 45, 133, G, 47, B.CONCRETE); fill(130, G, 49, 133, G, 51, B.CONCRETE);   // the raised back step of each court
+  setRaw(129, G, 46, B.CONCRETE);                                                        // the buttress ("pepper")
+  setRaw(129, G, 50, B.CONCRETE);
+  [44, 48, 52].forEach(z => fill(124, G, z, 124, G + 3, z, B.BRICK));
+  ring(123, 43, 134, 53, G + 4, G + 4, B.RENDER);
+  for (let x = 124; x <= 133; x += 2) fill(x, G + 4, 44, x, G + 4, 52, B.RENDER);
+  reserve(122, 42, 136, 54);
+  });
+
+  at(443, 88, () => {
   // ── Chapel: green weatherboarding, a black-and-white timbered band with triple windows, brown tiled roof,
   //    a bell turret at the west end, a cross-gabled chancel at the east end, the door on the aisle at the west end ──
   place('Chapel', 124, 54, 158, 66, { walk: [129.5, 60.5, Math.PI / 2], label: [146, 60] });
@@ -1020,7 +1103,11 @@ function buildSchool() {
   fill(CX0, G - 1, 55, CW0 - 1, G - 1, 55, B.FLOWERS);
   ground(124, 53, 159, 53, B.TARMAC);
   reserve(122, 52, 160, 67);
+  soffit(135, 56, 151, 64, G + 6, B.WBOARD);
+  soffit(151, 55, 157, 65, G + 6, B.WBOARD);
+  });
 
+  at(445, 118, () => {
   // ── Theatre: oak frame, galleries with mesh railings, blue tiered seating, brick stage wall ──
   place('Theatre', 62, 67, 99, 89, { walk: [80.5, 91.5, 0] });
   shell(62, 70, 98, 86, 7, B.BRICK, { rows: [1, 2, 3, 5], step: 2, floor: B.PINEFL });
@@ -1058,7 +1145,10 @@ function buildSchool() {
   for (let x = 74; x <= 90; x += 2) for (let z = 76; z <= 80; z++) if (z !== 78) setRaw(x, G, z, B.BLUECHAIR);   // folding chairs
   fill(86, G, 82, 87, G, 82, B.TPALE);
   ground(62, 87, 99, 89, B.PAVE);
+  soffit(62, 70, 98, 86, G + 7, B.PLASTER);
+  });
 
+  at(444, 116, () => {
   // ── Music: pine floorboards, cream walls, a mural, keyboards, red chairs, ukuleles ──
   place('Music', 100, 70, 116, 83, { walk: [119.5, 76.5, -Math.PI / 2] });
   shell(100, 70, 116, 82, 6, B.BRICK, { rows: [1, 2, 4], floor: B.PINEFL });
@@ -1075,24 +1165,17 @@ function buildSchool() {
   [[103, 73], [105, 73]].forEach(([x, z]) => setRaw(x, G, z, B.RCHAIR));
   fill(113, G, 72, 114, G + 1, 72, B.DADO);   // upright piano
   fill(101, G + 5, 71, 115, G + 5, 81, B.CEIL);
+  });
 
-  // ── A brick classroom block south of Music (no label) ──
-  shell(102, 86, 116, 100, 6, B.BRICK, { rows: [1, 2, 4], floor: B.PCARPET });
-  gable(102, 86, 116, 100, G + 6, 'z', B.SLATE, B.BRICK);
-  for (let z = 89; z <= 97; z += 4) { fill(116, G + 6, z, 117, G + 7, z + 1, B.SLATE); setRaw(116, G + 6, z, B.WINDOW); }
-  door(116, 92, 'z', 2);
-  lineIn(102, 86, 116, 100, G, G + 5, B.CREAM);
-  for (let x = 105; x <= 113; x += 2) for (const z of [90, 91, 95, 96]) setRaw(x, G, z, z % 5 === 0 || z === 91 ? B.TPALE : B.RCHAIR);
-  swapIn(103, G + 1, 87, 115, G + 2, 87, B.CREAM, B.DISPLAY);
-
+  at(444, 120, () => {
   // ── Exploration Centre: Ceramics, CDT and the Art Room, white and full of light ──
-  place('Exploration Centre', 60, 90, 116, 127, { walk: [89.5, 122.5, 0], label: [88, 123] });
+  place('Exploration Centre', 60, 90, 116, 119, { walk: [68.5, 100.5, Math.PI], label: [100, 112] });
   shell(60, 104, 116, 118, 6, B.BRICK, { rows: [1, 2, 3], step: 2, floor: B.TILEF });
   gable(60, 104, 116, 118, G + 6, 'x', B.CLAYW, B.BRICK);
   for (const sx of [64, 70, 76, 100, 106, 112]) for (const k of [2, 3]) fill(sx, G + 6 + k, 119 - k, sx + 1, G + 6 + k, 119 - k, B.SKY);   // roof lights on the south slope only
   fill(80, G, 105, 80, G + 5, 117, B.PLASTER); fill(96, G, 105, 96, G + 5, 117, B.PLASTER);
   fill(80, G, 110, 80, G + 1, 111, B.AIR); fill(96, G, 110, 96, G + 1, 111, B.AIR);
-  door(87, 118, 'x', 3); door(68, 118, 'x', 2); door(108, 118, 'x', 2);
+  door(68, 104, 'x', 2); door(108, 104, 'x', 2);   // doors on the courtyard side only; the south front has none
   lineIn(60, 104, 116, 118, G, G + 5, B.PLASTER); lineIn(60, 104, 116, 118, G + 6, G + 16, B.PLASTER);
   // Ceramics (west): wooden work tables, blue racking, tiled splashback and sinks, potter's wheels
   place('Ceramics', 61, 105, 79, 117, { walk: [78.5, 110.5, -Math.PI / 2] });
@@ -1122,9 +1205,23 @@ function buildSchool() {
   fill(95, G, 96, 95, G + 1, 102, B.RACK);
   fill(81, G, 96, 81, G + 1, 101, B.PLANCHEST);
   [[86, 96], [92, 100]].forEach(([x, z]) => { setRaw(x, G, z, B.OAKPOST); setRaw(x, G + 1, z, B.WBOARDW); });
-  ground(60, 119, 116, 127, B.GRAVEL);
   lawn(62, 90, 79, 103, 'x', 2); lawn(97, 90, 101, 103, 'x', 2);
+  soffit(60, 104, 116, 118, G + 6, B.PLASTER);
+  soffit(80, 94, 96, 105, G + 3, B.PLASTER);
+  });
 
+  at(443, 119, () => {
+  // ── A brick classroom block south of Music (no label) ──
+  shell(102, 86, 116, 100, 6, B.BRICK, { rows: [1, 2, 4], floor: B.PCARPET });
+  gable(102, 86, 116, 100, G + 6, 'z', B.SLATE, B.BRICK);
+  for (let z = 89; z <= 97; z += 4) { fill(116, G + 6, z, 117, G + 7, z + 1, B.SLATE); setRaw(116, G + 6, z, B.WINDOW); }
+  door(116, 92, 'z', 2);
+  lineIn(102, 86, 116, 100, G, G + 5, B.CREAM);
+  for (let x = 105; x <= 113; x += 2) for (const z of [90, 91, 95, 96]) setRaw(x, G, z, z % 5 === 0 || z === 91 ? B.TPALE : B.RCHAIR);
+  swapIn(103, G + 1, 87, 115, G + 2, 87, B.CREAM, B.DISPLAY);
+  });
+
+  at(425, 120, () => {
   // ── Monkey House: raised timber walkways and platforms among the trees ──
   place('Monkey House', 92, 128, 123, 143, { walk: [93.5, 133.5, Math.PI / 2], label: [108, 135] });
   [[101, 137], [109, 130], [117, 137], [106, 142], [96, 129], [121, 131]].forEach(([x, z]) => tree(x, z, 'pine'));
@@ -1143,30 +1240,75 @@ function buildSchool() {
   fill(97, DY + 1, 133, 97, DY + 1, 134, B.AIR);   // way in from the steps
   fill(95, G, 133, 95, G, 134, B.DECK); fill(96, G, 133, 96, G + 1, 134, B.DECK);
   for (let z = 128; z <= 143; z++) for (let x = 92; x <= 123; x++) if (getB(x, G - 1, z) === B.GRASS) setRaw(x, G - 1, z, B.DIRT);
+  });
 
-  // ── White ceilings under the sloping roofs ──
-  soffit(50, 50, 72, 60, G + 6, B.PLASTER);           // Dining Hall
-  soffit(62, 70, 98, 86, G + 7, B.PLASTER);           // Theatre
-  soffit(45, 40, 120, 50, G + 10, B.CREAM);           // Dormitories
-  soffit(60, 104, 116, 118, G + 6, B.PLASTER);        // Exploration Centre
-  soffit(80, 94, 96, 105, G + 3, B.PLASTER);          // Art Room
-  soffit(135, 56, 151, 64, G + 6, B.WBOARD);          // Chapel nave
-  soffit(151, 55, 157, 65, G + 6, B.WBOARD);          // Chapel chancel
+  at(445, 110, () => {
+  // ── Camps ──
+  place('Camps', 0, 119, 40, 143, { walk: [16.5, 130.5, 0] });
+  ground(10, 124, 26, 136, B.DIRT);
+  const shelter = (x, z) => { for (let i = 0; i < 4; i++) fill(x, G + i, z + i, x + 4, G + i, z + i, B.LOG); fill(x, G, z, x, G + 3, z, B.LOG); fill(x + 4, G, z, x + 4, G + 3, z, B.LOG); };
+  shelter(11, 125); shelter(20, 125); shelter(12, 132);
+  setRaw(18, G - 1, 131, B.EMBER); setRaw(18, G, 131, B.FIRE);
+  [[16, 131], [20, 131], [18, 129], [18, 133]].forEach(([x, z]) => setRaw(x, G, z, B.LOG));
+  });
 
-  // ── Woods and hedgerows everywhere else ──
-  woods(0, ZMIN, 21, 9, 320, 0.35);             // west of the crops
-  woods(0, 10, W - 1, 22, 900, 0.3);            // the wood behind the school
-  woods(0, 22, 11, 143, 260, 0.35);             // west edge
-  woods(19, 14, 44, 19, 30);                    // behind the forecourt
-  woods(34, 22, 44, 36, 30);
-  woods(36, 54, 44, 60, 6);
-  woods(124, 124, W - 1, 143, 160, 0.3);        // south-east
-  woods(41, 119, 59, 143, 70);                  // south of the Top Lawn
-  woods(60, 128, 91, 143, 60);                  // south of the Exploration Centre
-  woods(154, 22, W - 1, 63, 140, 0.4);          // east of the pool and chapel
-  woods(134, 22, 153, 29, 30);
-  woods(0, 119, 40, 143, 240, 0.2);             // the Camps wood
-  woods(62, 56, 71, 69, 10);                    // between the dining hall and the theatre
+  // ── Chapel Ground: the cricket nets along the north end ──
+  place('Chapel Ground', 567, 156, 623, 236, { walk: [579.5, 200.5, Math.PI / 2] });
+  for (let z = 156; z <= 236; z++) for (let x = 567; x <= 623; x++) setRaw(x, G - 1, z, B.DRYLAWN);
+  reserve(567, 156, 623, 236);
+  fill(588, G - 1, 158, 620, G - 1, 171, B.COURT);
+  ring(588, 158, 620, 171, G, G + 3, B.CNET); fill(588, G + 4, 158, 620, G + 4, 171, B.CNET);
+  for (const x of [596, 604, 612]) fill(x, G, 159, x, G + 3, 170, B.CNET);
+  for (const x of [591, 599, 607, 615]) fill(x, G, 171, x + 1, G + 1, 171, B.AIR);
+
+  // ── The Astro: four courts behind a high fence, cricket nets alongside, a house by the lane ──
+  place('Astro', 580, 236, 628, 306, { walk: [599.5, 232.5, Math.PI] });
+  ground(582, 237, 617, 306, B.COURT);
+  for (const [x0, x1] of [[583, 598], [601, 616]]) for (const [z0, z1] of [[239, 270], [273, 304]]) {
+    for (let z = z0; z <= z1; z++) { setRaw(x0, G - 1, z, B.CLINE); setRaw(x1, G - 1, z, B.CLINE); setRaw(x0 + 2, G - 1, z, B.CLINE); setRaw(x1 - 2, G - 1, z, B.CLINE); }
+    for (let x = x0; x <= x1; x++) { setRaw(x, G - 1, z0, B.CLINE); setRaw(x, G - 1, z1, B.CLINE); setRaw(x, G - 1, z0 + 7, B.CLINE); setRaw(x, G - 1, z1 - 7, B.CLINE); }
+    const xm = Math.round((x0 + x1) / 2), zm = Math.round((z0 + z1) / 2);
+    for (let z = z0 + 7; z <= z1 - 7; z++) setRaw(xm, G - 1, z, B.CLINE);
+    fill(x0 - 1, G, zm, x1 + 1, G, zm, B.NET);
+  }
+  ring(581, 236, 618, 307, G, G + 3, B.NET); fill(581, G, 252, 581, G + 2, 254, B.AIR);
+  fill(619, G - 1, 251, 627, G - 1, 289, B.COURT);
+  ring(619, 251, 627, 289, G, G + 3, B.CNET); fill(619, G + 4, 251, 627, G + 4, 289, B.CNET);
+  for (const z of [261, 270, 279]) fill(620, G, z, 626, G + 3, z, B.CNET);
+  reserve(579, 234, 629, 309);
+  shell(565, 290, 579, 302, 6, B.BRICK, { rows: [1, 2, 4], step: 2 }); gable(565, 290, 579, 302, G + 6, 'x', B.SLATE, B.BRICK); chimney(572, 296, G + 12, 2); door(565, 296, 'z', 1);
+  reserve(563, 288, 581, 304);
+
+  // ── The pond in the trees to the north-east ──
+  for (let z = 68; z <= 94; z++) for (let x = 610; x <= 644; x++) { const r = ((x - 627) / 16) ** 2 + ((z - 81) / 12) ** 2; if (r < 1) { setRaw(x, G - 1, z, B.WATER); setRaw(x, G - 2, z, B.WATER); } else if (r < 1.25) setRaw(x, G - 1, z, B.DIRT); }
+  reserve(608, 66, 646, 96);
+
+  // ── The playing fields to the west, and the field south of the school ──
+  place('Playing Fields', 16, 82, 272, 417, { walk: [140.5, 288.5, 0], label: [188, 238] });
+  place('South Field', 350, 362, 466, 442, { walk: [408.5, 446.5, 0], label: [408, 400] });
+  for (const F of FIELDS) { if (F.key === 'chapel') continue; for (let z = F.z0; z <= F.z1; z++) for (let x = F.x0; x <= F.x1; x++) setRaw(x, G - 1, z, B.DRYLAWN); reserve(F.x0, F.z0, F.x1, F.z1); }
+  for (let z = 275; z <= 299; z++) for (let x = 34; x <= 152; x++) setRaw(x, G - 1, z, B.DRY);
+  pavilion(25, 295);                                            // pavilion on the edge of the cricket field
+  pavilion(-65, 429, true);                                     // the small pavilion in the corner of the lower field
+  [[148, 160], [166, 166], [228, 300], [70, 286], [300, 330], [190, 300]].forEach(([x, z]) => chestnut(x, z));
+
+  // ── Woods, tree belts and hedgerows ──
+  canopy(0, 0, W - 1, 60, (x, z) => z < roadZ(x) - 4);           // trees along the north side of the road
+  canopy(341, 14, 460, 340, (x, z) => z > roadZ(x) + 4 && !(x > 455 && z < 120));   // the wood west of the school
+  canopy(466, 219, 582, 318);                                   // the wood south of the school (the Monkey House and the Camps are inside)
+  canopy(470, 160, 486, 172);
+  canopy(597, 56, 655, 155, (x, z) => z > roadZ(x) + 4);        // north-east, round the pond
+  canopy(624, 155, 655, 318);                                   // the east belt beyond Chapel Ground
+  canopy(600, 120, 624, 155);
+  canopy(16, 150, 30, 410); canopy(30, 82, 118, 89); canopy(116, 82, 121, 192); canopy(121, 187, 256, 193);
+  canopy(256, 184, 272, 296); canopy(30, 263, 120, 270); canopy(152, 296, 166, 412); canopy(30, 409, 166, 417);
+  belt([[330, 24], [318, 250], [306, 500]], 22);
+  canopy(256, 296, 277, 497);
+  belt([[395, 446], [436, 574]], 16);
+  canopy(31, 446, 164, 538);
+  belt([[0, 600], [200, 590], [340, 610]], 14);
+  woods(338, 100, 400, 360, 160, 0.3);                          // scattered trees in the meadow
+  woods(277, 300, 340, 420, 60, 0.2);
   markPitches(false);
 }
 
@@ -1238,8 +1380,11 @@ function paintSeason() {
 const FIELD_GROUND = () => new Set([B.DRY, B.DRYLAWN, B.LAWN, B.STRIP, B.PLINE]);
 const MARKERS = () => new Set([B.POST, B.GOALNET, B.SIGHT, B.STUMPS]);
 const FIELDS = [
-  { key: 'main', x0: 96, z0: ZMIN, x1: W - 1, z1: 9, stripe: (x, z) => Math.floor(x / 5) % 2 },
-  { key: 'chapel', x0: 126, z0: 67, x1: 157, z1: 124, stripe: (x, z) => Math.floor(z / 4) % 2 },
+  { key: 'chapel', x0: 567, z0: 173, x1: 623, z1: 236, stripe: (x, z) => Math.floor(z / 4) % 2 },
+  { key: 'A', x0: 34, z0: 90, x1: 115, z1: 262, stripe: (x, z) => Math.floor(z / 5) % 2 },
+  { key: 'B', x0: 123, z0: 194, x1: 254, z1: 280, stripe: (x, z) => Math.floor(x / 5) % 2 },
+  { key: 'C', x0: 34, z0: 300, x1: 152, z1: 408, stripe: (x, z) => Math.floor(z / 5) % 2 },
+  { key: 'D', x0: 350, z0: 362, x1: 466, z1: 442, stripe: (x, z) => Math.floor(x / 5) % 2 },
 ];
 function markPitches(rebuild) {
   const okGround = FIELD_GROUND(), markers = MARKERS();
@@ -1288,15 +1433,22 @@ function markPitches(rebuild) {
       for (let a = 0; a < 360; a++) { const t = a / 360 * Math.PI * 2; ink(Math.round(cx + Math.cos(t) * r), Math.round(cz + Math.sin(t) * r)); }
       if (screens) for (const z of screens) for (let x = sx - 2; x <= sx + 3; x++) for (let y = G; y <= G + 2; y++) put(x, y, z, B.SIGHT);
     };
-    if (F.key === 'main') {
-      if (sport === 0) { football(P('x', 114, 142, -29, -9)); football(P('x', 146, 172, -29, -9)); }
-      else if (sport === 1) rugby(P('x', 113, 172, -30, -6));
-      else { cricket(114, -22, 130, -6, 121, -20, -9, 122, -14, 24, [ZMIN + 1, 6]); cricket(150, -20, 162, -6, 155, -18, -8, 156, -13, 17, null); }
-    } else {
-      if (sport === 0) football(P('z', 69, 121, 130, 153));
-      else if (sport === 1) rugby(P('z', 68, 122, 129, 154));
-      else cricket(139, 84, 153, 104, 146, 88, 99, 146, 94, 21, null);
-    }
+    const LAY = {
+      chapel: [() => football(P('z', 176, 232, 573, 617)), () => rugby(P('z', 175, 234, 571, 619)), () => cricket(586, 192, 604, 222, 594, 196, 214, 595, 207, 30, null)],
+      A: [() => { football(P('z', 96, 166, 38, 72)); football(P('z', 96, 166, 80, 112)); football(P('z', 180, 254, 42, 106)); },
+          () => { rugby(P('z', 94, 176, 40, 110)); rugby(P('z', 180, 260, 40, 110)); },
+          () => cricket(67, 170, 83, 194, 75, 173, 189, 75, 181, 38, null)],
+      B: [() => { football(P('x', 128, 186, 204, 250)); football(P('x', 194, 250, 204, 250)); },
+          () => rugby(P('x', 126, 252, 198, 276)),
+          () => cricket(156, 226, 172, 246, 163, 229, 243, 164, 236, 42, [197, 277])],
+      C: [() => { football(P('z', 306, 376, 44, 86)); football(P('z', 306, 376, 98, 140)); },
+          () => rugby(P('z', 304, 404, 52, 132)),
+          () => cricket(77, 329, 93, 349, 84, 332, 346, 85, 339, 46, null)],
+      D: [() => { football(P('x', 356, 408, 372, 412)); football(P('x', 414, 462, 372, 412)); },
+          () => rugby(P('x', 354, 464, 366, 438)),
+          () => cricket(400, 392, 416, 412, 407, 395, 409, 408, 402, 36, null)],
+    };
+    LAY[F.key][sport]();
   }
   if (rebuild) {
     for (const F of FIELDS) {
@@ -1361,15 +1513,19 @@ function compile(vs, fs) {
 let blockProg, pointProg, atlasTex;
 if (gl) {
   blockProg = compile(`
-    attribute vec3 aPos; attribute vec2 aUV; attribute vec3 aCol;
+    attribute vec3 aPos; attribute vec2 aUV; attribute vec2 aTile; attribute vec3 aCol;
     uniform mat4 uMVP; uniform vec3 uEye; uniform vec2 uFog;
-    varying vec2 vUV; varying vec3 vCol; varying float vFog;
-    void main(){ gl_Position = uMVP * vec4(aPos,1.0); vUV = aUV; vCol = aCol;
+    varying vec2 vUV; varying vec2 vTile; varying vec3 vCol; varying float vFog;
+    void main(){ gl_Position = uMVP * vec4(aPos,1.0); vUV = aUV; vTile = aTile; vCol = aCol;
       vFog = clamp((distance(aPos,uEye) - uFog.x) / (uFog.y - uFog.x), 0.0, 1.0); }`, `
+    #ifdef GL_FRAGMENT_PRECISION_HIGH
+    precision highp float;
+    #else
     precision mediump float;
+    #endif
     uniform sampler2D uTex; uniform vec3 uFogCol; uniform float uAlpha;
-    varying vec2 vUV; varying vec3 vCol; varying float vFog;
-    void main(){ vec4 t = texture2D(uTex, vUV); if (t.a < 0.5) discard;
+    varying vec2 vUV; varying vec2 vTile; varying vec3 vCol; varying float vFog;
+    void main(){ vec2 f = clamp(fract(vUV), 0.002, 0.998); vec4 t = texture2D(uTex, (vTile + f) / 16.0); if (t.a < 0.5) discard;
       gl_FragColor = vec4(mix(t.rgb * vCol, uFogCol, vFog), uAlpha); }`);
   pointProg = compile(`
     attribute vec3 aPos; attribute vec4 aCol; attribute float aSize;
@@ -1398,49 +1554,74 @@ for (let d = 0; d < 3; d++) for (const s of [1, -1]) {
 const AOL = [0.48, 0.64, 0.82, 1.0];
 const isOpq = (x, y, z) => BL[getB(x, y, z)].opaque ? 1 : 0;
 const chunks = [];
-function pushFace(out, x, y, z, f, def) {
-  const tile = def[f.key], tx = tile % 16, ty = Math.floor(tile / 16), e = 0.002;
-  const base = [x, y, z]; if (f.s > 0) base[f.d] += 1;
-  const nb = [x + f.n[0], y + f.n[1], z + f.n[2]];
-  const corners = f.s > 0 ? [[0, 0], [1, 0], [1, 1], [0, 1]] : [[0, 0], [0, 1], [1, 1], [1, 0]];
-  const vs = [], aos = [];
+// Texture coordinates in block units for a corner (cu, cv) of a du × dv face; the shader repeats the tile
+function texUV(d, cu, cv, du, dv) { const ou = cu * du, ov = cv * dv; return d === 2 ? [ou, dv - ov] : [ov, du - ou]; }
+function faceAO(x, y, z, f) {
+  const nb = [x + f.n[0], y + f.n[1], z + f.n[2]], corners = f.s > 0 ? [[0, 0], [1, 0], [1, 1], [0, 1]] : [[0, 0], [0, 1], [1, 1], [1, 0]], aos = [];
   for (const [cu, cv] of corners) {
-    const p = base.slice(); p[f.u] += cu; p[f.v] += cv;
-    let ao = 3;
-    if (!def.emissive) {
-      const q1 = nb.slice(), q2 = nb.slice(), q3 = nb.slice();
-      q1[f.u] += cu ? 1 : -1; q2[f.v] += cv ? 1 : -1; q3[f.u] += cu ? 1 : -1; q3[f.v] += cv ? 1 : -1;
-      const s1 = isOpq(q1[0], q1[1], q1[2]), s2 = isOpq(q2[0], q2[1], q2[2]), c = isOpq(q3[0], q3[1], q3[2]);
-      ao = s1 && s2 ? 0 : 3 - (s1 + s2 + c);
-    }
-    const l = def.emissive ? 1.15 : f.shade * AOL[ao];
-    let hu, hv;
-    if (f.d === 0) { hu = cv; hv = cu; } else if (f.d === 2) { hu = cu; hv = cv; } else { hu = cv; hv = cu; }
-    const u = (tx + (hu ? 1 - e : e)) / 16, v = (ty + (hv ? e : 1 - e)) / 16;
-    vs.push([p[0], p[1], p[2], u, v, l, l, l]); aos.push(ao);
+    const q1 = nb.slice(), q2 = nb.slice(), q3 = nb.slice();
+    q1[f.u] += cu ? 1 : -1; q2[f.v] += cv ? 1 : -1; q3[f.u] += cu ? 1 : -1; q3[f.v] += cv ? 1 : -1;
+    const s1 = isOpq(q1[0], q1[1], q1[2]), s2 = isOpq(q2[0], q2[1], q2[2]), c = isOpq(q3[0], q3[1], q3[2]);
+    aos.push(s1 && s2 ? 0 : 3 - (s1 + s2 + c));
   }
-  const order = aos[0] + aos[2] >= aos[1] + aos[3] ? [0, 1, 2, 0, 2, 3] : [1, 2, 3, 1, 3, 0];
+  return aos;
+}
+// One face (or a merged rectangle of faces w × h along the face's u and v axes)
+function pushFace(out, x, y, z, f, def, aos, w, h) {
+  w = w || 1; h = h || 1;
+  const tile = def[f.key], tx = tile % 16, ty = Math.floor(tile / 16);
+  const base = [x, y, z]; if (f.s > 0) base[f.d] += 1;
+  const corners = f.s > 0 ? [[0, 0], [1, 0], [1, 1], [0, 1]] : [[0, 0], [0, 1], [1, 1], [1, 0]];
+  const vs = [];
+  for (let i = 0; i < 4; i++) {
+    const [cu, cv] = corners[i], p = base.slice(); p[f.u] += cu * w; p[f.v] += cv * h;
+    const l = def.emissive ? 1.15 : f.shade * AOL[aos ? aos[i] : 3];
+    const [tu, tv] = texUV(f.d, cu, cv, w, h);
+    vs.push([p[0], p[1], p[2], tu, tv, tx, ty, l, l, l]);
+  }
+  const order = !aos || aos[0] + aos[2] >= aos[1] + aos[3] ? [0, 1, 2, 0, 2, 3] : [1, 2, 3, 1, 3, 0];
   for (const i of order) out.push(...vs[i]);
 }
+const VF = 10;   // floats per vertex: position, uv, tile, colour
+const gmask = new Int32Array(CS * CS);
 function buildChunk(ci) {
   const cx = ci % NCX, cz = Math.floor(ci / NCX) % NCZ, cy = Math.floor(ci / (NCX * NCZ));
+  const X0 = cx * CS, Y0 = cy * CS, Z0 = cz * CS;
   const o = [], w = [];
-  for (let y = cy * CS; y < cy * CS + CS; y++) for (let zz = cz * CS; zz < cz * CS + CS; zz++) for (let x = cx * CS; x < cx * CS + CS; x++) {
-    const b = world[(y * DT + zz) * W + x]; if (!b) continue;
-    const z = zz + ZMIN;
-    const def = BL[b];
-    for (const f of FACES) {
-      const n = getB(x + f.n[0], y + f.n[1], z + f.n[2]);
-      if (b === B.WATER) { if (n !== B.WATER && !BL[n].opaque) pushFace(w, x, y, z, f, def); continue; }
-      if (BL[n].opaque) continue;
-      if (n === b && def.alpha) continue;
-      pushFace(o, x, y, z, f, def);
+  let any = false;
+  for (let y = Y0; y < Y0 + CS && !any; y++) for (let zz = Z0; zz < Z0 + CS && !any; zz++) { const r = (y * DT + zz) * W + X0; for (let x = 0; x < CS; x++) if (world[r + x]) { any = true; break; } }
+  if (any) for (const f of FACES) {
+    const d = f.d, u = f.u, v = f.v, p = [0, 0, 0], org = [X0, Y0, Z0];
+    for (let i = 0; i < CS; i++) {
+      gmask.fill(0);
+      for (let b = 0; b < CS; b++) for (let a = 0; a < CS; a++) {
+        p[d] = org[d] + i; p[u] = org[u] + a; p[v] = org[v] + b;
+        const x = p[0], y = p[1], z = p[2] + ZMIN;
+        const blk = world[(y * DT + p[2]) * W + x]; if (!blk) continue;
+        const def = BL[blk], n = getB(x + f.n[0], y + f.n[1], z + f.n[2]);
+        if (blk === B.WATER) { if (n !== B.WATER && !BL[n].opaque) pushFace(w, x, y, z, f, def, null); continue; }
+        if (BL[n].opaque || (n === blk && def.alpha)) continue;
+        if (def.emissive) { gmask[a + b * CS] = blk; continue; }
+        const aos = faceAO(x, y, z, f);
+        if (aos[0] === 3 && aos[1] === 3 && aos[2] === 3 && aos[3] === 3) gmask[a + b * CS] = blk;
+        else pushFace(o, x, y, z, f, def, aos);
+      }
+      // Merge equal faces into rectangles
+      for (let b = 0; b < CS; b++) for (let a = 0; a < CS; a++) {
+        const k = gmask[a + b * CS]; if (!k) continue;
+        let ww = 1; while (a + ww < CS && gmask[a + ww + b * CS] === k) ww++;
+        let hh = 1;
+        grow: while (b + hh < CS) { for (let t = 0; t < ww; t++) if (gmask[a + t + (b + hh) * CS] !== k) break grow; hh++; }
+        for (let bb = 0; bb < hh; bb++) for (let t = 0; t < ww; t++) gmask[a + t + (b + bb) * CS] = 0;
+        p[d] = org[d] + i; p[u] = org[u] + a; p[v] = org[v] + b;
+        pushFace(o, p[0], p[1], p[2] + ZMIN, f, BL[k], null, ww, hh);
+      }
     }
   }
   let c = chunks[ci];
   if (!c) c = chunks[ci] = { vbo: gl.createBuffer(), wbo: gl.createBuffer(), n: 0, wn: 0, cx: (cx + .5) * CS, cz: ZMIN + (cz + .5) * CS };
-  gl.bindBuffer(gl.ARRAY_BUFFER, c.vbo); gl.bufferData(gl.ARRAY_BUFFER, new Float32Array(o), gl.STATIC_DRAW); c.n = o.length / 8;
-  gl.bindBuffer(gl.ARRAY_BUFFER, c.wbo); gl.bufferData(gl.ARRAY_BUFFER, new Float32Array(w), gl.STATIC_DRAW); c.wn = w.length / 8;
+  gl.bindBuffer(gl.ARRAY_BUFFER, c.vbo); gl.bufferData(gl.ARRAY_BUFFER, new Float32Array(o), gl.STATIC_DRAW); c.n = o.length / VF;
+  gl.bindBuffer(gl.ARRAY_BUFFER, c.wbo); gl.bufferData(gl.ARRAY_BUFFER, new Float32Array(w), gl.STATIC_DRAW); c.wn = w.length / VF;
 }
 
 // ── Matrices ──
@@ -1480,11 +1661,11 @@ function spawnPupils() {
       tunic: pick(JUMPERS), legs: [0.42, 0.42, 0.45], skin: pick(SKINS), hair: pick(HAIRS), scale: rr(0.82, 0.92) }, o || {});
     const p0 = path[n.seg]; n.x = p0[0] + rr(-0.4, 0.4); n.z = p0[1] + rr(-0.4, 0.4); npcs.push(n);
   };
-  for (let i = 0; i < 3; i++) add([[78.5, 57.5], [97.5, 57.5], [97.5, 66.5], [78.5, 66.5]]);           // round the Quad
-  for (let i = 0; i < 3; i++) add([[57, 64], [57, 126]]);                                               // up and down the avenue
-  for (let i = 0; i < 2; i++) add([[122, 42], [122, 120]]);                                        // the lane
-  for (let i = 0; i < 2; i++) add([[74, 53.5], [116, 53.5]]);                                          // along the front
-  for (let i = 0; i < 2; i++) add([[30, 70], [44, 96], [24, 110], [14, 84]]);                         // Top Lawn
+  for (let i = 0; i < 3; i++) add([[519.5, 172.5], [538.5, 172.5], [538.5, 181.5], [519.5, 181.5]]);           // round the Quad
+  for (let i = 0; i < 3; i++) add([[498.5, 179], [498.5, 246]]);                                               // up and down the avenue
+  for (let i = 0; i < 2; i++) add([[563.5, 110], [563.5, 300]]);                                        // the lane
+  for (let i = 0; i < 2; i++) add([[515, 168.5], [557, 168.5]]);                                          // along the front
+  for (let i = 0; i < 2; i++) add([[430, 186], [486, 190], [480, 212], [432, 208]]);                         // Top Lawn
   // Players on the pitches, dressed for the sport
   const WHITES = [0.95, 0.95, 0.93];
   const team = (n, x0, x1, z0, z1, shirts, shorts, speed) => {
@@ -1492,17 +1673,17 @@ function spawnPupils() {
   };
   if (sport === 0) {        // football: red against white
     const kits = [[0.8, 0.14, 0.14], [0.95, 0.95, 0.95]];
-    team(10, 116, 140, -27, -11, kits, [0.12, 0.12, 0.16], [3, 5]); team(10, 148, 170, -27, -11, [[0.16, 0.3, 0.7], [0.95, 0.8, 0.2]], [0.12, 0.12, 0.16], [3, 5]);
-    team(10, 132, 151, 72, 118, kits, [0.12, 0.12, 0.16], [3, 5]);
+    team(10, 132, 182, 206, 248, kits, [0.12, 0.12, 0.16], [3, 5]); team(10, 198, 246, 206, 248, [[0.16, 0.3, 0.7], [0.95, 0.8, 0.2]], [0.12, 0.12, 0.16], [3, 5]);
+    team(10, 576, 614, 180, 228, kits, [0.12, 0.12, 0.16], [3, 5]);
   } else if (sport === 1) { // rugby: navy against red
     const kits = [[0.14, 0.2, 0.42], [0.72, 0.14, 0.14]];
-    team(14, 118, 167, -27, -9, kits, [0.95, 0.95, 0.95], [2.6, 4.6]); team(12, 131, 152, 73, 117, kits, [0.95, 0.95, 0.95], [2.6, 4.6]);
+    team(14, 132, 246, 202, 272, kits, [0.95, 0.95, 0.95], [2.6, 4.6]); team(12, 574, 616, 180, 230, kits, [0.95, 0.95, 0.95], [2.6, 4.6]);
   } else {                  // cricket: whites, as in the tour photo of Chapel Ground
-    team(9, 134, 156, 76, 112, [WHITES, [0.72, 0.84, 0.95]], WHITES, [1.4, 3.6]);
-    for (let i = 0; i < 2; i++) add([[158, 70.5], [169, 70.5]], { speed: 3, tunic: WHITES, legs: WHITES });   // in the nets
-    team(9, 104, 140, -30, 2, [WHITES], WHITES, [1.2, 3]);
+    team(9, 578, 612, 186, 228, [WHITES, [0.72, 0.84, 0.95]], WHITES, [1.4, 3.6]);
+    for (let i = 0; i < 2; i++) add([[592, 166.5], [592, 160.5]], { speed: 2, tunic: WHITES, legs: WHITES });   // in the nets
+    team(9, 135, 195, 205, 268, [WHITES], WHITES, [1.2, 3]);
   }
-  for (let i = 0; i < 2; i++) add([[70, 30], [74, 32]], { speed: 3, tunic: [0.95, 0.95, 0.95], legs: [0.95, 0.95, 0.95] });   // tennis
+  for (let i = 0; i < 2; i++) add([[500, 75], [506, 78]], { speed: 3, tunic: [0.95, 0.95, 0.95], legs: [0.95, 0.95, 0.95] });   // tennis
 }
 function pickR(a, b) { return a + Math.random() * (b - a); }
 function turnTo(n, h, dt, rate) { let d = h - n.h; d = Math.atan2(Math.sin(d), Math.cos(d)); n.h += d * Math.min(1, dt * rate); }
@@ -1534,9 +1715,8 @@ function nbox(n, cx, cy, cz, sx, sy, sz, col, tile, front, piv, rx) {
   }
   BOX_F.forEach(([ci, shade], fi) => {
     const t = fi === 0 && front != null ? front : tile;
-    const u0 = (t % 16) / 16 + 0.002, v0 = Math.floor(t / 16) / 16 + 0.002, u1 = u0 + 1 / 16 - 0.004, v1 = v0 + 1 / 16 - 0.004;
-    const uv = [[u0, v1], [u1, v1], [u1, v0], [u0, v0]];
-    for (const q of [0, 1, 2, 0, 2, 3]) { const p = pts[ci[q]]; nv.push(p[0], p[1], p[2], uv[q][0], uv[q][1], col[0] * shade, col[1] * shade, col[2] * shade); }
+    const uv = [[0.01, 0.99], [0.99, 0.99], [0.99, 0.01], [0.01, 0.01]], tx = t % 16, ty = Math.floor(t / 16);
+    for (const q of [0, 1, 2, 0, 2, 3]) { const p = pts[ci[q]]; nv.push(p[0], p[1], p[2], uv[q][0], uv[q][1], tx, ty, col[0] * shade, col[1] * shade, col[2] * shade); }
   });
 }
 function drawHuman(n) {
@@ -1617,7 +1797,7 @@ function startFly(pl) {
   if (pl) {   // hover south of the place, looking at it
     Object.assign(P, { x: pl.cx, z: Math.min(D + 10, pl.cz + 26), y: G + 22, yaw: 0, pitch: -0.62 });
   } else {    // the same view as the aerial photo
-    Object.assign(P, { x: 92, z: 168, y: G + 46, yaw: 0, pitch: -0.42 });
+    Object.assign(P, { x: 530, z: 318, y: G + 62, yaw: 0, pitch: -0.42 });
   }
   setFly(true, true);
   enterPlay();
@@ -1642,7 +1822,7 @@ function updatePlayer(dt) {
   const sy = Math.sin(P.yaw), cy = Math.cos(P.yaw);
   if (fly) {
     // Spectator flight: forward follows the look direction, no collisions
-    const cp = Math.cos(P.pitch), sp = Math.sin(P.pitch), sp0 = 22;
+    const cp = Math.cos(P.pitch), sp = Math.sin(P.pitch), sp0 = 34;
     let up = 0; if (keys.Space || touch.up) up += 1; if (keys.ShiftLeft || keys.ShiftRight || keys.KeyC || touch.down) up -= 1;
     const tx = (sy * cp * fz + cy * fx) * sp0, tz = (-cy * cp * fz + sy * fx) * sp0, ty = sp * fz * sp0 + up * sp0 * 0.7;
     const k = Math.min(1, dt * 6);
@@ -1768,6 +1948,7 @@ document.addEventListener('click', e => {
   if (t.closest('#pMapBtn')) { openMap(); return; }
   if (t.closest('#quitBtn')) { mode = 'title'; $('splashTxt').textContent = pick(SPLASHES); show('sTitle'); return; }
   if (t.closest('#mapClose')) { closeMap(); return; }
+  if (t.closest('#mapZoom')) { mapView = mapView === 'school' ? 'site' : 'school'; drawBig(); return; }
   if (t.closest('#mapWalk')) { mapGoWalk = true; refreshMapBtns(); return; }
   if (t.closest('#mapFly')) { mapGoWalk = false; refreshMapBtns(); return; }
 });
@@ -1797,11 +1978,14 @@ function drawArrow(c, x, y, s, yaw) {
 function drawMini() {
   const cv = $('mini'), c = cv.getContext('2d');
   c.imageSmoothingEnabled = false;
-  c.clearRect(0, 0, cv.width, cv.height);
-  c.drawImage(mapImg, 0, 0);
-  drawArrow(c, P.x, P.z - ZMIN, 6, P.yaw);
+  c.fillStyle = '#000'; c.fillRect(0, 0, cv.width, cv.height);
+  const sx = Math.max(0, Math.min(W - cv.width, Math.round(P.x - cv.width / 2))), sz = Math.max(0, Math.min(DT - cv.height, Math.round(P.z - ZMIN - cv.height / 2)));
+  c.drawImage(mapImg, sx, sz, cv.width, cv.height, 0, 0, cv.width, cv.height);
+  drawArrow(c, P.x - sx, P.z - ZMIN - sz, 6, P.yaw);
 }
 let mapGoWalk = true, fromTitle = false, mapScale = 4;
+const VIEWS = { school: [418, 36, 250, 280], site: [0, 0, W, DT] };
+let mapView = 'school';
 function refreshMapBtns() { $('mapWalk').classList.toggle('on', mapGoWalk); $('mapFly').classList.toggle('on', !mapGoWalk); }
 function openMap() {
   if (mode === 'play' || mode === 'pause') fromTitle = false;
@@ -1821,22 +2005,27 @@ function closeMap() {
 function drawBig() {
   const cv = $('big');
   const maxW = Math.min(innerWidth - 40, 1100), maxH = innerHeight - 190;
-  mapScale = Math.max(1.6, Math.min(maxW / W, maxH / DT));
+  const [vx, vz, vw, vh] = VIEWS[mapView];
+  mapScale = Math.max(0.6, Math.min(maxW / vw, maxH / vh));
   const dpr = Math.min(window.devicePixelRatio || 1, 2);
-  cv.style.width = W * mapScale + 'px'; cv.style.height = DT * mapScale + 'px';
-  cv.width = Math.round(W * mapScale * dpr); cv.height = Math.round(DT * mapScale * dpr);
+  cv.style.width = vw * mapScale + 'px'; cv.style.height = vh * mapScale + 'px';
+  cv.width = Math.round(vw * mapScale * dpr); cv.height = Math.round(vh * mapScale * dpr);
   const c = cv.getContext('2d'), s = mapScale * dpr;
   c.imageSmoothingEnabled = false;
-  c.drawImage(mapImg, 0, 0, cv.width, cv.height);
+  c.drawImage(mapImg, vx, vz, vw, vh, 0, 0, cv.width, cv.height);
+  $('mapZoom').textContent = mapView === 'school' ? 'Whole site' : 'School';
   c.textAlign = 'center'; c.textBaseline = 'middle';
   c.font = `600 ${Math.round(Math.max(11, s * 3.1))}px 'Pixelify Sans', monospace`;
   for (const pl of PLACES) {
-    const tx = pl.cx * s, ty = (pl.cz - ZMIN) * s, w = c.measureText(pl.name).width + 12 * dpr, h = Math.max(16, s * 4.2);
+    pl.hit = null;
+    if (pl.cx < vx || pl.cx > vx + vw || pl.cz < vz || pl.cz > vz + vh) continue;
+    if (mapView === 'site' && pl.cx > 418 && pl.cz < 320 && !['Chapel Ground', 'Top Lawn', 'Quad', 'Theatre'].includes(pl.name)) continue;
+    const tx = (pl.cx - vx) * s, ty = (pl.cz - ZMIN - vz) * s, w = c.measureText(pl.name).width + 12 * dpr, h = Math.max(16, s * 4.2);
     pl.hit = [tx - w / 2, ty - h / 2, w, h];
     c.fillStyle = pl === hoverPl ? 'rgba(80,90,150,.9)' : 'rgba(0,0,0,.6)'; c.fillRect(tx - w / 2, ty - h / 2, w, h);
     c.fillStyle = pl === hoverPl ? '#fff' : '#ffe08a'; c.fillText(pl.name, tx, ty + 1);
   }
-  if (!fromTitle) drawArrow(c, P.x * s, (P.z - ZMIN) * s, Math.max(8, s * 2.4), P.yaw);
+  if (!fromTitle) drawArrow(c, (P.x - vx) * s, (P.z - ZMIN - vz) * s, Math.max(10, s * 2.4), P.yaw);
   // Compass
   c.fillStyle = 'rgba(0,0,0,.6)'; c.fillRect(cv.width - 40 * dpr, 8 * dpr, 32 * dpr, 32 * dpr);
   c.fillStyle = '#fff'; c.font = `700 ${16 * dpr}px 'Pixelify Sans', monospace`; c.fillText('N', cv.width - 24 * dpr, 18 * dpr);
@@ -1848,7 +2037,8 @@ function mapPlaceAt(e) {
   const x = (e.clientX - r.left) * k, y = (e.clientY - r.top) * k;
   for (const pl of PLACES) { const h = pl.hit; if (h && x >= h[0] && x <= h[0] + h[2] && y >= h[1] && y <= h[1] + h[3]) return pl; }
   // Otherwise whichever footprint the click falls in
-  const wx = Math.floor((e.clientX - r.left) / mapScale), wz = Math.floor((e.clientY - r.top) / mapScale) + ZMIN;
+  const [vx, vz] = VIEWS[mapView];
+  const wx = Math.floor((e.clientX - r.left) / mapScale) + vx, wz = Math.floor((e.clientY - r.top) / mapScale) + ZMIN + vz;
   const id = inWorld(wx, wz) ? area[ai(wx, wz)] : 0;
   return id ? PLACES[id - 1] : null;
 }
@@ -1908,7 +2098,7 @@ function updateTags(mvp, eye, here, dt) {
     const hx = T.pl.cx, hy = T.y, hz = T.pl.cz;
     const d = Math.hypot(hx - eye[0], hy - eye[1], hz - eye[2]);
     const cw = m[3] * hx + m[7] * hy + m[11] * hz + m[15];
-    const far = fly ? 190 : 80, near = fly ? 0 : 5;
+    const far = fly ? 320 : 90, near = fly ? 0 : 5;
     if (cw < 0.5 || d > far || d < near || mode !== 'play' || T.pl === here && !fly) continue;
     const cx = (m[0] * hx + m[4] * hy + m[8] * hz + m[12]) / cw, cy = (m[1] * hx + m[5] * hy + m[9] * hz + m[13]) / cw;
     if (Math.abs(cx) > 1.1 || Math.abs(cy) > 1.1) continue;
@@ -1966,14 +2156,14 @@ function frame(now) {
   }
   if (mode !== 'pause' && mode !== 'map') for (const n of npcs) npcStep(n, dt);
   // Smoke from the camp fire
-  if ((smokeT -= dt) < 0) { smokeT = 0.12; const g = 0.55 + Math.random() * 0.2; spawn(18.5 + (Math.random() - .5) * .4, G + 1, 131.5, (Math.random() - .5) * .3, 1.4 + Math.random(), (Math.random() - .5) * .3, 4, [g, g, g, 0.8], 0.35 + Math.random() * 0.3, -0.05); }
+  if ((smokeT -= dt) < 0) { smokeT = 0.12; const g = 0.55 + Math.random() * 0.2; spawn(463.5 + (Math.random() - .5) * .4, G + 1, 241.5, (Math.random() - .5) * .3, 1.4 + Math.random(), (Math.random() - .5) * .3, 4, [g, g, g, 0.8], 0.35 + Math.random() * 0.3, -0.05); }
 
   // Camera
   let eye, ctr;
   if (mode === 'title') {
     titleT += dt * 0.05;
-    eye = [92 + Math.sin(titleT) * 95, G + 48, 72 + Math.cos(titleT) * 85];
-    ctr = [92, G + 4, 64];
+    eye = [528 + Math.sin(titleT) * 150, G + 70, 175 + Math.cos(titleT) * 140];
+    ctr = [528, G + 4, 170];
   } else {
     const d = lookDir();
     eye = [P.x, P.y + (fly ? 0 : EYE), P.z];
@@ -1983,9 +2173,9 @@ function frame(now) {
     if (mode !== 'title') for (let y = Math.floor(eye[1]) + 1; y < Math.min(H, eye[1] + 24); y++) if (BL[getB(ex, y, ez)].opaque) { indoors = true; break; }
     if (mode !== 'map' && mode !== 'pause') seasonFall(dt, eye, indoors); }
   const high = mode === 'title' || fly;
-  const fog = high ? [120 * FOGK, 330 * FOGK] : [50 * FOGK, 190 * FOGK];
+  const fog = high ? [200 * FOGK, 620 * FOGK] : [70 * FOGK, 260 * FOGK];
   const fov = 1.2, aspect = canvas.width / canvas.height;
-  const mvp = mmul(persp(fov, aspect, 0.05, 600), lookAt(eye, ctr));
+  const mvp = mmul(persp(fov, aspect, 0.05, 900), lookAt(eye, ctr));
 
   gl.viewport(0, 0, canvas.width, canvas.height);
   gl.clearColor(SKY[0], SKY[1], SKY[2], 1);
@@ -1997,23 +2187,24 @@ function frame(now) {
   gl.uniformMatrix4fv(bp.u.uMVP, false, mvp);
   gl.uniform3fv(bp.u.uEye, eye); gl.uniform2fv(bp.u.uFog, fog); gl.uniform3fv(bp.u.uFogCol, SKY);
   gl.activeTexture(gl.TEXTURE0); gl.bindTexture(gl.TEXTURE_2D, atlasTex); gl.uniform1i(bp.u.uTex, 0);
-  gl.enableVertexAttribArray(bp.a.aPos); gl.enableVertexAttribArray(bp.a.aUV); gl.enableVertexAttribArray(bp.a.aCol);
+  gl.enableVertexAttribArray(bp.a.aPos); gl.enableVertexAttribArray(bp.a.aUV); gl.enableVertexAttribArray(bp.a.aTile); gl.enableVertexAttribArray(bp.a.aCol);
   const bindBlock = buf => {
     gl.bindBuffer(gl.ARRAY_BUFFER, buf);
-    gl.vertexAttribPointer(bp.a.aPos, 3, gl.FLOAT, false, 32, 0);
-    gl.vertexAttribPointer(bp.a.aUV, 2, gl.FLOAT, false, 32, 12);
-    gl.vertexAttribPointer(bp.a.aCol, 3, gl.FLOAT, false, 32, 20);
+    gl.vertexAttribPointer(bp.a.aPos, 3, gl.FLOAT, false, 40, 0);
+    gl.vertexAttribPointer(bp.a.aUV, 2, gl.FLOAT, false, 40, 12);
+    gl.vertexAttribPointer(bp.a.aTile, 2, gl.FLOAT, false, 40, 20);
+    gl.vertexAttribPointer(bp.a.aCol, 3, gl.FLOAT, false, 40, 28);
   };
   gl.disable(gl.BLEND); gl.depthMask(true); gl.uniform1f(bp.u.uAlpha, 1);
   for (const c of chunks) if (c && c.n && Math.hypot(c.cx - eye[0], c.cz - eye[2]) < fog[1] + 24) { bindBlock(c.vbo); gl.drawArrays(gl.TRIANGLES, 0, c.n); }
   nv.length = 0;
   for (const n of npcs) if (Math.abs(n.x - eye[0]) + Math.abs(n.z - eye[2]) < 160) drawHuman(n);
-  const nn = nv.length / 8;
+  const nn = nv.length / VF;
   if (nn) { gl.bindBuffer(gl.ARRAY_BUFFER, npcBuf); gl.bufferData(gl.ARRAY_BUFFER, new Float32Array(nv), gl.DYNAMIC_DRAW); bindBlock(npcBuf); gl.drawArrays(gl.TRIANGLES, 0, nn); }
   gl.enable(gl.BLEND); gl.blendFunc(gl.SRC_ALPHA, gl.ONE_MINUS_SRC_ALPHA); gl.depthMask(false); gl.uniform1f(bp.u.uAlpha, 0.72);
   for (const c of chunks) if (c && c.wn) { bindBlock(c.wbo); gl.drawArrays(gl.TRIANGLES, 0, c.wn); }
   gl.depthMask(true);
-  gl.disableVertexAttribArray(bp.a.aUV); gl.disableVertexAttribArray(bp.a.aCol);
+  gl.disableVertexAttribArray(bp.a.aUV); gl.disableVertexAttribArray(bp.a.aTile); gl.disableVertexAttribArray(bp.a.aCol);
 
   // Particles
   for (let i = parts.length - 1; i >= 0; i--) {
